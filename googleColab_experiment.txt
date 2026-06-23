@@ -1,0 +1,248 @@
+note: the file is .ipynb, ---... means new cell
+----------------------------------------------------------------------------------------------------------------------------------
+from datasets import load_dataset
+dataset = load_dataset("supergoose/flan_source_dbpedia_14_pick_one_category_for_the_following_text_28")
+data = dataset['train'].to_pandas()
+----------------------------------------------------------------------------------------------------------------------------------
+data.rename(columns={'inputs': 'text', 'targets': 'label'}, inplace=True)
+drop_columns = [col for col in data.columns if col not in ['text', 'label']]
+data.drop(columns=drop_columns, inplace=True)
+----------------------------------------------------------------------------------------------------------------------------------
+data['label'] = data['label'].str.replace(r'\n-+', '', regex=True).str.strip()
+data['label'] = data['label'].str.replace(r'^A:\s*', '', regex=True)
+data = data.groupby('label', group_keys=False).apply(lambda x: x.sample(min(len(x), 5000), random_state=42)).reset_index(drop=True)
+
+def clean(teks):
+    teks = str(teks).strip()
+    if not teks or teks.lower() == 'nan':
+        return ""
+
+    teks_lower = teks.lower()
+    intercept_point = -1
+
+    for keyword in ["following text.", "following text:", "following text", "text:"]:
+        if keyword in teks_lower:
+            intercept_point = teks_lower.find(keyword) + len(keyword)
+            break
+
+    if intercept_point != -1:
+        teks = teks[intercept_point:]
+
+    if "options are" in teks.lower():
+        drop_options = teks.find(".")
+        if drop_options != -1:
+            teks = teks[drop_options + 1:]
+
+    return teks.strip()
+
+data['text'] = data['text'].apply(clean)
+data = data[data['text'] != ""].reset_index(drop=True)
+----------------------------------------------------------------------------------------------------------------------------------
+data["label"] = data["label"].replace({
+    'Animal': 'Biology',
+    'Athlete': 'Sports',
+    'Building': 'Infrastructures',
+    'Company': 'Business',
+    'Educational Institution': 'Education',
+    'Film': 'Entertainment',
+    'Mean Of Transportation': 'Vehicles',
+    'Natural Place': 'Nature',
+    'Written Work': 'Books'
+})
+----------------------------------------------------------------------------------------------------------------------------------
+label_drop = ['Office Holder', 'Plant', 'Album', 'Artist', 'Village']
+data = data[~data['label'].isin(label_drop)].reset_index(drop=True)
+----------------------------------------------------------------------------------------------------------------------------------
+data.head()
+----------------------------------------------------------------------------------------------------------------------------------
+data.shape
+----------------------------------------------------------------------------------------------------------------------------------
+data['label'].value_counts()
+----------------------------------------------------------------------------------------------------------------------------------
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk.tag import pos_tag
+from nltk.probability import FreqDist
+from nltk.classify import NaiveBayesClassifier
+from nltk.classify import accuracy
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.svm import LinearSVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
+
+import string
+import random
+import nltk
+
+nltk.download('stopwords')
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('wordnet')
+nltk.download('omw-1.4')
+----------------------------------------------------------------------------------------------------------------------------------
+lemma = WordNetLemmatizer()
+eng_stopwords = set(stopwords.words('english'))
+punctuation = set(string.punctuation)
+
+def get_tag(tag):
+    if tag.startswith('J'): return 'a'
+    elif tag.startswith('V'): return 'v'
+    elif tag.startswith('R'): return 'r'
+    else: return 'n'
+
+def preprocess_text(text):
+    text = ''.join([c for c in text if c not in punctuation and not c.isdigit()])
+
+    word_list = word_tokenize(text)
+    tagged = pos_tag(word_list)
+
+    clean_tokens = []
+    for word, tag in tagged:
+        if word not in eng_stopwords and len(word) > 2:
+            pos_clean = get_tag(tag)
+            lemma_word = lemma.lemmatize(word, pos=pos_clean)
+            clean_tokens.append(lemma_word)
+
+    return clean_tokens
+----------------------------------------------------------------------------------------------------------------------------------
+nltk.download('averaged_perceptron_tagger_eng')
+nltk.download('punkt_tab')
+data['clean_tokens'] = data['text'].apply(preprocess_text)
+data['text'] = data['clean_tokens'].apply(lambda tokens: ' '.join(tokens))
+data = data[data['text'] != ""].reset_index(drop=True)
+----------------------------------------------------------------------------------------------------------------------------------
+# 1. Naive Bayes Classifier
+
+x = data[['text', 'clean_tokens']]
+y = data ['label']
+
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42, stratify=y)
+
+all_train_tokens = [token for sublist in x_train['clean_tokens'] for token in sublist]
+fdist = FreqDist(all_train_tokens)
+word_features = set([word for word, freq in fdist.most_common(10000)])
+
+def extract_feature(text_tokens):
+    document_words = set(text_tokens)
+    return {word: (word in document_words) for word in word_features}
+
+train_set_nb = [(extract_feature(tokens), label) for tokens, label in zip(x_train['clean_tokens'], y_train)]
+test_set_nb = [(extract_feature(tokens), label) for tokens, label in zip(x_test['clean_tokens'], y_test)]
+
+classifier = NaiveBayesClassifier.train(train_set_nb)
+acc = accuracy(classifier, test_set_nb)
+print(f'NLTK Naive Bayes Accuracy: {acc * 100:.2f}%')
+----------------------------------------------------------------------------------------------------------------------------------
+# 2. SVM + TF-IDF
+
+tfidf = TfidfVectorizer(max_features=5000, min_df=5, ngram_range=(1, 2), sublinear_tf=True)
+x_train_tfidf = tfidf.fit_transform(x_train['text'])
+x_test_tfidf = tfidf.transform(x_test['text'])
+
+SVM = LinearSVC(C=0.2, random_state=42, max_iter=2000)
+SVM.fit(x_train_tfidf, y_train)
+y_pred_svm = SVM.predict(x_test_tfidf)
+
+print(f"LinearSVC Accuracy: {accuracy_score(y_test, y_pred_svm) * 100:.2f}%")
+print(classification_report(y_test, y_pred_svm))
+----------------------------------------------------------------------------------------------------------------------------------
+# 3. Logistic Regression + TF-IDF
+
+logreg_model = LogisticRegression(C=2.0, solver='lbfgs', max_iter=2000, random_state=42)
+logreg_model.fit(x_train_tfidf, y_train)
+y_pred_logreg = logreg_model.predict(x_test_tfidf)
+
+print(f"Logistic Regression Accuracy: {accuracy_score(y_test, y_pred_logreg) * 100:.2f}%")
+print(classification_report(y_test, y_pred_logreg))
+----------------------------------------------------------------------------------------------------------------------------------
+# 4. Random Forest + TF-IDF
+
+rf_model = RandomForestClassifier(n_estimators=200, max_depth=50, random_state=42, n_jobs=-1)
+rf_model.fit(x_train_tfidf, y_train)
+y_pred_rf = rf_model.predict(x_test_tfidf)
+
+print(f"Random Forest Accuracy: {accuracy_score(y_test, y_pred_rf) * 100:.2f}%")
+print(classification_report(y_test, y_pred_rf))
+----------------------------------------------------------------------------------------------------------------------------------
+print("Model Accuracy Summary (so far):")
+print()
+print(f"Naive Bayes Accuracy: {acc * 100:.2f}%")
+print(f"SVM Accuracy: {accuracy_score(y_test, y_pred_svm) * 100:.2f}%")
+print(f"Logreg Accuracy: {accuracy_score(y_test, y_pred_logreg) * 100:.2f}%")
+print(f"Random Forest Accuracy: {accuracy_score(y_test, y_pred_rf) * 100:.2f}%")
+----------------------------------------------------------------------------------------------------------------------------------
+import numpy as np
+
+test_samples = [
+    {
+        "true_label": "Biology",
+        "text": "The Bengal tiger is a population of the Panthera tigris tigris subspecies native to the Indian subcontinent. It is threatened by poaching and habitat destruction."
+    },
+    {
+        "true_label": "Sports",
+        "text": "He won three consecutive gold medals in the 100m and 200m sprints at the Olympic Games, cementing his legacy as the fastest runner in track and field history."
+    },
+    {
+        "true_label": "Business",
+        "text": "The multinational technology corporation announced its quarterly revenue growth, driven by strong cloud infrastructure services and enterprise software acquisitions."
+    },
+    {
+        "true_label": "Entertainment",
+        "text": "This sci-fi thriller was directed by Christopher Nolan, starring a brilliant cast. The cinematic masterpiece won several Academy Awards for best visual effects and sound editing."
+    },
+    {
+        "true_label": "Vehicles",
+        "text": "The boeing 747 is a large, long-range wide-body airliner designed and manufactured by aircraft companies, featuring a partial double-deck configuration."
+    }
+]
+
+def get_svm_confidence(decision_values):
+    exp_values = np.exp(decision_values - np.max(decision_values))
+    prob = exp_values / np.sum(exp_values)
+    return prob
+
+def predict_nltk_nb(text_tokens, nb_classifier):
+    feats = extract_feature(text_tokens)
+    prob_dist = nb_classifier.prob_classify(feats)
+    pred_label = prob_dist.max()
+    confidence = prob_dist.prob(pred_label)
+    return pred_label, confidence
+
+print("=== RESULT OF 5 CUSTOM TESTS ===")
+print("-" * 60)
+
+for i, sample in enumerate(test_samples, 1):
+    raw_text = sample["text"]
+    true_cat = sample["true_label"]
+
+    tokens = preprocess_text(raw_text)
+    clean_str = ' '.join(tokens)
+
+    tfidf_vector = tfidf.transform([clean_str])
+
+    nb_pred, nb_conf = predict_nltk_nb(tokens, classifier)
+
+    svm_decision = SVM.decision_function(tfidf_vector)[0]
+    svm_probs = get_svm_confidence(svm_decision)
+    svm_pred = SVM.predict(tfidf_vector)[0]
+    svm_conf = np.max(svm_probs)
+
+    logreg_pred = logreg_model.predict(tfidf_vector)[0]
+    logreg_probs = logreg_model.predict_proba(tfidf_vector)[0]
+    logreg_conf = np.max(logreg_probs)
+
+    rf_pred = rf_model.predict(tfidf_vector)[0]
+    rf_probs = rf_model.predict_proba(tfidf_vector)[0]
+    rf_conf = np.max(rf_probs)
+
+    print(f"\n[Text {i}] (True Class: {true_cat})")
+    print(f"\"{raw_text[:85]}...\"")
+    print(f"  └─ Naive Bayes       -> Prediction: {nb_pred:<22} | Confidence: {nb_conf*100:.2f}%")
+    print(f"  └─ LinearSVC (SVM)   -> Prediction: {svm_pred:<22} | Confidence: {svm_conf*100:.2f}%")
+    print(f"  └─ Logistic Reg.     -> Prediction: {logreg_pred:<22} | Confidence: {logreg_conf*100:.2f}%")
+    print(f"  └─ Random Forest     -> Prediction: {rf_pred:<22} | Confidence: {rf_conf*100:.2f}%")
+    print("-" * 60)

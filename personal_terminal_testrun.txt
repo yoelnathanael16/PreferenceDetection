@@ -1,1 +1,17 @@
+pip install:
+
+streamlit
+scikit-learn
+joblib
+nltk
+
+
+to run, open terminal and type:
+
+streamlit run app.py (instant)
+or
+& "your streamlit.exe file explorer path" run app.py (saver)
+
+
+personal python version: 3.14.5
 & "C:\Users\Asus\AppData\Local\Python\pythoncore-3.14-64\Scripts\streamlit.exe" run app.py
